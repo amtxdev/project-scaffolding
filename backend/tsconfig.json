@@ -1,8 +1,17 @@
 {
-  "extends": "../tsconfig.json",
   "compilerOptions": {
     "rootDir": "src",
-    "outDir": "dist"
+    "outDir": "dist",
+    "module": "CommonJS",
+    "moduleResolution": "node",
+    "target": "ES2022",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "declaration": true,
+    "isolatedModules": true,
+    "allowSyntheticDefaultImports": true
   },
   "include": ["src"]
 }

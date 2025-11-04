@@ -1,0 +1,269 @@
+services:
+  # PostgreSQL Database - Production-ready configuration
+  postgres:
+    image: postgres:15-alpine
+    container_name: ticketing-postgres
+    environment:
+      - POSTGRES_USER=${DB_USER}
+      - POSTGRES_PASSWORD=${DB_PASSWORD}
+      - POSTGRES_DB=${DB_NAME}
+      
+      # Security: Disable logging of connection attempts (adjust for production)
+      - POSTGRES_INITDB_ARGS=--auth-host=scram-sha-256
+    ports:
+      - ${DB_PORT}:${DB_PORT}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # TODO: Add init scripts for schema/migrations in production
+    networks:
+      - ticketing-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ticketing_db || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    # Security: Run as non-root user (PostgreSQL handles this internally)
+    # Scalability: Configure connection pooling in app, not here
+    # TODO: For production, use managed database service (RDS, Cloud SQL, etc.)
+
+  # Backend API Instance 1 - With Nginx reverse proxy
+  backend-1:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: ticketing-backend-1
+    # No external ports - accessed via load balancer
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - BE_PORT=3000
+      - DATABASE_URL=postgresql://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}
+      - DB_HOST=${DB_HOST}
+      - DB_PORT=${DB_PORT}
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_NAME=${DB_NAME}
+      - JWT_SECRET=${JWT_SECRET}
+      - JWT_EXPIRES_IN=${JWT_EXPIRES}
+      # Admin Credentials (for seeding)
+      - ADMIN_EMAIL=${ADMIN_EMAIL}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD}
+    volumes:
+      # For development, mount source code
+      - ./backend/src:/app/src
+    networks:
+      - ticketing-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+
+  # Backend API Instance 2 - With Nginx reverse proxy (for load balancing)
+  backend-2:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: ticketing-backend-2
+    # No external ports - accessed via load balancer
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - BE_PORT=3000
+      - DATABASE_URL=postgresql://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}
+      - DB_HOST=${DB_HOST}
+      - DB_PORT=${DB_PORT}
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_NAME=${DB_NAME}
+      - JWT_SECRET=${JWT_SECRET}
+      - JWT_EXPIRES_IN=${JWT_EXPIRES}
+      # Admin Credentials (for seeding)
+      - ADMIN_EMAIL=${ADMIN_EMAIL}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD}
+    volumes:
+      # For development, mount source code
+      - ./backend/src:/app/src
+    networks:
+      - ticketing-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+
+  # Nginx Load Balancer for Backend - Distributes requests across backend instances
+  nginx-lb-backend:
+    image: nginx:alpine
+    container_name: ticketing-nginx-lb-backend
+    ports:
+      - "${BE_PORT}:80"  # Expose load balancer on backend port
+      - "8080:8080"       # Health check port
+    volumes:
+      - ./infra/nginx-lb/backend-lb.conf:/etc/nginx/nginx.conf:ro
+    networks:
+      - ticketing-network
+    depends_on:
+      - backend-1
+      - backend-2
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 128M
+        reservations:
+          cpus: '0.1'
+          memory: 64M
+
+  # Frontend Instance 1 - React application served with nginx
+  frontend-1:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        # Build-time API URL - browser-accessible URL (since frontend runs in browser, not container)
+        # Note: Vite env vars are baked at build time, so this must be the URL the browser can reach
+        # Default: http://localhost:3000/api (assumes backend on same host at port 3000)
+        # For production with different host/port, override this build arg or use reverse proxy
+        VITE_API_BASE_URL: http://localhost:${BE_PORT}/api
+    container_name: ticketing-frontend-1
+    # No external ports - accessed via load balancer
+    environment:
+      # Runtime environment (nginx serves static files, but included for reference)
+      - NODE_ENV=production
+    networks:
+      - ticketing-network
+    depends_on:
+      nginx-lb-backend:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+        reservations:
+          cpus: '0.1'
+          memory: 64M
+
+  # Frontend Instance 2 - React application served with nginx (for load balancing)
+  frontend-2:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: http://localhost:${BE_PORT}/api
+    container_name: ticketing-frontend-2
+    # No external ports - accessed via load balancer
+    environment:
+      - NODE_ENV=production
+    networks:
+      - ticketing-network
+    depends_on:
+      nginx-lb-backend:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+        reservations:
+          cpus: '0.1'
+          memory: 64M
+
+  # Nginx Load Balancer for Frontend - Distributes requests across frontend instances
+  nginx-lb-frontend:
+    image: nginx:alpine
+    container_name: ticketing-nginx-lb-frontend
+    ports:
+      - "3001:80"        # Expose load balancer on frontend port
+      - "8081:8080"      # Health check port
+    volumes:
+      - ./infra/nginx-lb/frontend-lb.conf:/etc/nginx/nginx.conf:ro
+    networks:
+      - ticketing-network
+    depends_on:
+      - frontend-1
+      - frontend-2
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 128M
+        reservations:
+          cpus: '0.1'
+          memory: 64M
+
+volumes:
+  postgres_data:
+    # Persistent volume - data survives container removal
+    # To backup: ./scripts/backup-db.sh
+    # To restore: ./scripts/restore-db.sh <backup_file>
+    # WARNING: docker compose down -v will DELETE this volume!
+    # Use: docker compose down (without -v) to preserve data
+    # TODO: Configure backup strategy for production
+    # TODO: Use managed volume providers (EBS, persistent disks, etc.)
+networks:
+  ticketing-network:
+    driver: bridge
+    # Security: Isolated network - services can only communicate within network
+    # TODO: Configure network policies for production (only allow necessary ports)
+    # TODO: Use overlay networks for multi-host deployments (Swarm/Kubernetes)
+
+
+
