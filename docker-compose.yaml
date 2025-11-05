@@ -1,3 +1,5 @@
+name: ticketing-system
+
 services:
   # PostgreSQL Database - Production-ready configuration
   postgres:
